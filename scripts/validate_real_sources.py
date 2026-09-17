@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
-import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -38,8 +39,9 @@ def fetch(url: str, dest: Path) -> dict:
     dest.parent.mkdir(parents=True, exist_ok=True)
     h = hashlib.sha256()
     total = 0
+    url = url.replace("ftp://ftp.ncbi.nlm.nih.gov/", "https://ftp.ncbi.nlm.nih.gov/")
     req = urllib.request.Request(url, headers={"User-Agent": "vec-external-catalog-validation/1.0"})
-    with urllib.request.urlopen(req, timeout=120) as r, dest.open("wb") as f:
+    with urllib.request.urlopen(req, timeout=180) as r, dest.open("wb") as f:
         while True:
             chunk = r.read(8 * 1024 * 1024)
             if not chunk:
@@ -48,28 +50,6 @@ def fetch(url: str, dest: Path) -> dict:
             h.update(chunk)
             total += len(chunk)
     return {"url": url, "sha256": h.hexdigest(), "bytes": total, "filename": dest.name}
-
-
-def fetch_public_s3(s3_uri: str, dest: Path) -> dict:
-    """Download a public S3 object using unsigned access and keep the exact failure text."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    proc = subprocess.run(
-        ["aws", "s3", "cp", "--no-sign-request", s3_uri, str(dest)],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-    )
-    if proc.returncode:
-        raise RuntimeError(
-            f"unsigned S3 download failed for {s3_uri} (exit {proc.returncode}): "
-            f"{proc.stderr.strip() or proc.stdout.strip()}"
-        )
-    return {
-        "s3_uri": s3_uri,
-        "access_method": "aws s3 cp --no-sign-request",
-        "aws_stdout": proc.stdout.strip(),
-        **hash_file(dest),
-    }
 
 
 def run(*args: object) -> subprocess.CompletedProcess:
@@ -125,6 +105,93 @@ def validate_gse247450() -> None:
     })
 
 
+def _parse_geo_family_soft(path: Path) -> dict[str, dict]:
+    samples: dict[str, dict] = {}
+    current = None
+    with gzip.open(path, "rt", encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            line = raw.rstrip("\n")
+            if line.startswith("^SAMPLE = "):
+                current = line.split("=", 1)[1].strip()
+                samples[current] = {"accession": current, "supplementary_files": [], "characteristics": []}
+                continue
+            if current is None:
+                continue
+            if line.startswith("!Sample_title = "):
+                samples[current]["title"] = line.split("=", 1)[1].strip()
+            elif line.startswith("!Sample_source_name_ch1 = "):
+                samples[current]["source_name"] = line.split("=", 1)[1].strip()
+            elif line.startswith("!Sample_characteristics_ch1 = "):
+                samples[current]["characteristics"].append(line.split("=", 1)[1].strip())
+            elif line.startswith("!Sample_supplementary_file = "):
+                samples[current]["supplementary_files"].append(line.split("=", 1)[1].strip())
+    return samples
+
+
+def validate_gse282547_e14_5() -> None:
+    """Discover and run one allowed E14.5 Visium sample from the real GEO release."""
+    family_url = "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE282nnn/GSE282547/soft/GSE282547_family.soft.gz"
+    family_path = WORK / "GSE282547_family.soft.gz"
+    family_source = fetch(family_url, family_path)
+    samples = _parse_geo_family_soft(family_path)
+
+    required = ["_matrix.mtx.gz", "_features.tsv.gz", "_barcodes.tsv.gz", "_tissue_positions_list.csv.gz"]
+    candidates = []
+    for gsm, sample in samples.items():
+        haystack = " ".join([
+            sample.get("title", ""), sample.get("source_name", ""),
+            *sample.get("characteristics", []), *sample.get("supplementary_files", []),
+        ])
+        if not re.search(r"E14(?:[._ ]?5)", haystack, flags=re.IGNORECASE):
+            continue
+        files = sample.get("supplementary_files", [])
+        if all(any(url.endswith(suffix) for url in files) for suffix in required):
+            candidates.append((gsm, sample))
+
+    if not candidates:
+        e14_seen = {
+            gsm: {"title": s.get("title"), "source_name": s.get("source_name"), "files": s.get("supplementary_files", [])}
+            for gsm, s in samples.items()
+            if re.search(r"E14(?:[._ ]?5)", " ".join([s.get("title", ""), s.get("source_name", "")]), flags=re.IGNORECASE)
+        }
+        raise RuntimeError(f"No E14.5 Visium sample with the four expected 10x files. E14.5 records: {e14_seen}")
+
+    gsm, sample = candidates[0]
+    raw = WORK / f"gse282547_{gsm}"
+    source_files = []
+    for suffix in required:
+        url = next(url for url in sample["supplementary_files"] if url.endswith(suffix))
+        source_files.append(fetch(url, raw / url.rsplit("/", 1)[-1]))
+
+    out = WORK / f"{gsm}.E14.5.t2-heart.h5ad"
+    proc = run(
+        ROOT / "processors/process_gse282547_visium.py", raw,
+        "--stage", "14.5", "--task", "t2-heart", "--out", out,
+    )
+    result = ad.read_h5ad(out)
+    provenance = json.loads(out.with_suffix(".provenance.json").read_text())
+
+    write_manifest("gse282547_e14_5_visium", {
+        "status": "real_release_processor_passed",
+        "source": "GSE282547 developing-heart atlas",
+        "sample_accession": gsm,
+        "sample_title": sample.get("title"),
+        "sample_source_name": sample.get("source_name"),
+        "sample_characteristics": sample.get("characteristics", []),
+        "family_soft": family_source,
+        "source_files": source_files,
+        "candidate_samples_with_required_files": [x[0] for x in candidates],
+        "command": "python processors/process_gse282547_visium.py <sample_dir> --stage 14.5 --task t2-heart --out <h5ad>",
+        "processor_exit": proc.returncode,
+        "processor_stdout": proc.stdout.strip(),
+        "output_spots": int(result.n_obs),
+        "output_genes": int(result.n_vars),
+        "spatial_2d_present": "spatial_2D" in result.obsm,
+        "spatial_3d_present": "spatial_3D" in result.obsm,
+        "provenance": provenance,
+    })
+
+
 def validate_mouse_go() -> None:
     url = "https://current.geneontology.org/annotations/gaf/MOUSE-mod.gaf.gz"
     src = WORK / "MOUSE-mod.gaf.gz"
@@ -145,50 +212,6 @@ def validate_mouse_go() -> None:
         "output_rows": int(len(table)),
         "genes_found": sorted(table["gene"].astype(str).unique().tolist()) if len(table) else [],
         "evidence_codes_observed": sorted(table["evidence"].astype(str).unique().tolist()) if len(table) else [],
-    })
-
-
-def validate_tabula_muris() -> None:
-    # Current AWS Open Data Registry bucket. Older project docs use the retired
-    # `czbiohub-tabula-muris` name, which now fails from hosted runners.
-    matrix_uri = "s3://czb-tabula-muris/TM_droplet_mat.h5ad"
-    meta_uri = "s3://czb-tabula-muris/TM_droplet_metadata.csv"
-    matrix = WORK / "TM_droplet_mat.h5ad"
-    metadata = WORK / "TM_droplet_metadata.csv"
-    sources = [fetch_public_s3(matrix_uri, matrix), fetch_public_s3(meta_uri, metadata)]
-    meta = pd.read_csv(metadata, index_col=0)
-    if "tissue" not in meta.columns:
-        raise RuntimeError(f"Expected tissue column in Tabula Muris metadata; saw {list(meta.columns)}")
-    tissue_values = sorted({str(x) for x in meta["tissue"].dropna().unique()})
-    heart_values = [x for x in tissue_values if "heart" in x.lower()]
-    if not heart_values:
-        raise RuntimeError(f"No heart-like tissue label in real metadata: {tissue_values}")
-
-    out = WORK / "tabula_muris_heart.h5ad"
-    cmd = [ROOT / "processors/process_tabula_muris.py", matrix, "--metadata", metadata]
-    for tissue in heart_values:
-        cmd += ["--tissue", tissue]
-    cmd += ["--out", out]
-    proc = run(*cmd)
-    inp = ad.read_h5ad(matrix, backed="r")
-    result = ad.read_h5ad(out)
-    provenance = json.loads(out.with_suffix(".provenance.json").read_text())
-    write_manifest("tabula_muris", {
-        "status": "real_release_processor_passed",
-        "source": "Tabula Muris droplet release",
-        "source_files": sources,
-        "command": "python processors/process_tabula_muris.py TM_droplet_mat.h5ad --metadata TM_droplet_metadata.csv --tissue <observed heart label(s)> --out <h5ad>",
-        "processor_exit": proc.returncode,
-        "processor_stdout": proc.stdout.strip(),
-        "input_cells": int(inp.n_obs),
-        "input_genes": int(inp.n_vars),
-        "metadata_rows": int(len(meta)),
-        "observed_metadata_columns": list(map(str, meta.columns)),
-        "heart_labels_used": heart_values,
-        "output_cells": int(result.n_obs),
-        "output_genes": int(result.n_vars),
-        "provenance": provenance,
-        "access_quirk": "legacy bucket name / plain HTTPS failed during validation; current Open Data Registry bucket `czb-tabula-muris` with unsigned S3 access is the working route",
     })
 
 
@@ -248,12 +271,28 @@ def record_extended_mouse_atlas_constraint() -> None:
     })
 
 
+def record_tabula_muris_demotion() -> None:
+    # We tried both the legacy project bucket and the current Open Data Registry bucket.
+    # The latter returned 403 HeadObject from GitHub Actions on 2026-09-17. Keep the failure
+    # visible, but do not repeatedly fail the catalog validator for a demoted optional source.
+    write_manifest("tabula_muris", {
+        "source": "Tabula Muris",
+        "status": "demoted_after_access_failure",
+        "reason": "developmentally distant, and advertised processed-object download was not reproducible from the hosted validator",
+        "observed_access_attempts": [
+            {"route": "legacy bucket czbiohub-tabula-muris", "result": "HTTP/S3 403"},
+            {"route": "Open Data Registry bucket czb-tabula-muris", "result": "HeadObject 403 Forbidden"},
+        ],
+        "recommendation": "Prefer the allowed E14.5+ developing-heart atlas for task-relevant later-stage priors.",
+    })
+
+
 def main() -> None:
     print("workdir", WORK)
     checks = [
         ("gse247450_e9_5_region0", validate_gse247450),
+        ("gse282547_e14_5_visium", validate_gse282547_e14_5),
         ("mouse_go", validate_mouse_go),
-        ("tabula_muris", validate_tabula_muris),
         ("sc3d_e9_0", probe_sc3d_release),
     ]
     failures = []
@@ -271,6 +310,7 @@ def main() -> None:
             print(f"FAILED {name}: {exc}", file=sys.stderr)
 
     record_extended_mouse_atlas_constraint()
+    record_tabula_muris_demotion()
     print("\nwrote manifests:")
     for p in sorted(VALIDATION.glob("*.json")):
         print(" -", p.relative_to(ROOT))
