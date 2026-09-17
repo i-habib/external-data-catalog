@@ -1,0 +1,6 @@
+{
+  "error": "RuntimeError(\"No E14.5 Visium sample with the four expected 10x files. E14.5 records: {'GSM8645799': {'title': 'e14.5_visium', 'source_name': 'heart', 'files': []}, 'GSM8645806': {'title': 'e14.5_1_slide_seq', 'source_name': 'heart', 'files': []}, 'GSM8645807': {'title': 'e14.5_2_slide_seq', 'source_name': 'heart', 'files': []}}\")",
+  "source": "gse282547_e14_5_visium",
+  "status": "validation_error",
+  "tested_on": "2026-09-17"
+}
