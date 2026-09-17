@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'scripts/validate_real_sources.py'
+      - 'scripts/add_vec_panel_overlap.py'
       - '.github/workflows/validate-real-sources.yml'
       - 'processors/**'
       - 'vec_external/**'
@@ -37,6 +38,9 @@ jobs:
         id: real_validation
         continue-on-error: true
         run: python scripts/validate_real_sources.py
+      - name: Record overlap with the pinned public VEC heart panel
+        if: always()
+        run: python scripts/add_vec_panel_overlap.py
       - name: Show validation manifests
         if: always()
         run: |
