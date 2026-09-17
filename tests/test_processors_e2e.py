@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import gzip
 import json
 import subprocess
 import sys
@@ -9,6 +10,8 @@ from pathlib import Path
 import anndata as ad
 import numpy as np
 import pandas as pd
+from scipy import sparse
+from scipy.io import mmwrite
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -119,6 +122,48 @@ def test_gse247450_end_to_end_without_inventing_3d(tmp_path):
     prov = json.loads(out.with_suffix(".provenance.json").read_text())
     assert prov["spatial_source"] is None
     assert "center_x" in prov["observed_metadata_columns"]
+
+
+def _gzip_file(src: Path, dst: Path):
+    with src.open("rb") as f_in, gzip.open(dst, "wb") as f_out:
+        f_out.write(f_in.read())
+
+
+def test_gse282547_visium_end_to_end_keeps_2d_explicit(tmp_path):
+    raw = tmp_path / "visium"
+    raw.mkdir()
+    prefix = "GSM_TEST_E14_5"
+
+    matrix_plain = raw / "matrix.mtx"
+    # Matrix Market is genes x spots, as in 10x output.
+    mmwrite(matrix_plain, sparse.coo_matrix(np.array([[1, 0], [2, 3], [0, 4]], dtype=np.int32)))
+    _gzip_file(matrix_plain, raw / f"{prefix}_matrix.mtx.gz")
+    matrix_plain.unlink()
+
+    with gzip.open(raw / f"{prefix}_features.tsv.gz", "wt", encoding="utf-8") as f:
+        f.write("ENSG1\tG1\tGene Expression\nENSG2\tG2\tGene Expression\nENSG3\tG3\tGene Expression\n")
+    with gzip.open(raw / f"{prefix}_barcodes.tsv.gz", "wt", encoding="utf-8") as f:
+        f.write("spotA\nspotB\n")
+    with gzip.open(raw / f"{prefix}_tissue_positions_list.csv.gz", "wt", encoding="utf-8") as f:
+        f.write("spotA,1,4,5,100.0,200.0\nspotB,1,6,7,110.0,210.0\n")
+
+    genes = tmp_path / "genes.txt"
+    write_gene_list(genes)
+    out = tmp_path / "e14_5.t2-heart.h5ad"
+    run_processor(
+        ROOT / "processors/process_gse282547_visium.py",
+        raw, "--stage", "14.5", "--task", "t2-heart", "--gene-list", genes, "--out", out,
+    )
+    result = ad.read_h5ad(out)
+    assert result.shape == (2, 2)
+    assert list(result.var_names) == ["G1", "G3"]
+    assert "spatial_2D" in result.obsm
+    assert "spatial_3D" not in result.obsm
+    assert np.allclose(result.obsm["spatial_2D"], [[200.0, 100.0], [210.0, 110.0]])
+    prov = json.loads(out.with_suffix(".provenance.json").read_text())
+    assert prov["stage"] == 14.5
+    assert prov["spatial_2d_present"] is True
+    assert prov["spatial_3d_present"] is False
 
 
 def test_tabula_muris_end_to_end(tmp_path):
