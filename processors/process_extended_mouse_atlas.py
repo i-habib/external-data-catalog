@@ -4,7 +4,11 @@ import argparse
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from vec_external.common import find_stage_column, stage_mask, load_gene_list, subset_genes, normalize_total_log1p, write_provenance
+from vec_external.common import (
+    find_stage_column, stage_mask, load_gene_list, subset_genes,
+    normalize_total_log1p, write_provenance, warn_if_t3_not_audited,
+    task_safety_metadata,
+)
 
 
 def main():
@@ -16,6 +20,8 @@ def main():
     p.add_argument("--gene-list", type=Path, help="optional VEC gene list; output keeps intersection in this order")
     p.add_argument("--use-raw-counts", action="store_true", help="use adata.raw counts when present, then normalize total+log1p")
     args = p.parse_args()
+
+    warn_if_t3_not_audited(args.task)
 
     import anndata as ad
     a = ad.read_h5ad(args.input)
@@ -36,12 +42,16 @@ def main():
     a.obs["vec_stage"] = [float(x) for x in parsed[keep]]
     args.out.parent.mkdir(parents=True, exist_ok=True)
     a.write_h5ad(args.out)
-    write_provenance(args.out.with_suffix(".provenance.json"),
+    write_provenance(
+        args.out.with_suffix(".provenance.json"),
         source="Extended Mouse Atlas", task=args.task, input=str(args.input), output=str(args.out),
         stage_column=str(stage_col), cells_before=before, cells_after=int(a.n_obs),
         protected_stages_removed=removed, gene_report=gene_report,
         source_url="https://marionilab.github.io/ExtendedMouseAtlas/",
-        rules_snapshot="2026-09-16")
+        rules_snapshot="2026-09-16", **task_safety_metadata(args.task),
+    )
     print(f"wrote {args.out}: {before} -> {a.n_obs} cells; removed stages {removed}")
 
-if __name__ == "__main__": main()
+
+if __name__ == "__main__":
+    main()

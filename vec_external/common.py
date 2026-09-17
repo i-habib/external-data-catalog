@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -44,6 +45,11 @@ STAGE_CANDIDATES = (
     "timepoint", "time_point", "age", "day",
 )
 
+T3_GENOTYPE_WARNING = (
+    "T3_GENOTYPE_NOT_AUDITED: this adapter only handles file/schema/stage mechanics. "
+    "It does not determine whether a perturbation, allele, phenocopy, or related genotype is eligible."
+)
+
 
 def canonical_task(task: str) -> str:
     key = task.strip().lower()
@@ -53,22 +59,63 @@ def canonical_task(task: str) -> str:
 
 
 def parse_stage(value) -> float:
+    """Parse one explicit embryonic-day label and fail closed on ambiguous staging.
+
+    Accepted examples: E8.5, E8_75, 9.5, "embryonic day 9.0".
+    Ranges, Theiler/somite labels, and strings containing extra stage-like numbers are
+    rejected so a protected mixed-stage sample cannot silently collapse to one endpoint.
+    """
     if value is None or (isinstance(value, float) and np.isnan(value)):
         raise ValueError("missing stage")
     if isinstance(value, (int, float, np.integer, np.floating)):
-        return float(value)
-    s = str(value).strip().lower().replace("_", ".")
-    m = re.search(r"(?:^|\b)e?\s*(\d+(?:\.\d+)?)", s)
+        x = float(value)
+        if not np.isfinite(x):
+            raise ValueError(f"non-finite stage {value!r}")
+        return x
+
+    raw = str(value).strip()
+    low = raw.lower()
+    if re.search(r"(?:theiler|\bts\s*\d|somite|\bss\s*\d)", low):
+        raise ValueError(f"Non-embryonic-day staging needs a source-specific parser: {value!r}")
+    if re.search(r"[–—/]", raw) or re.search(r"\d\s*-\s*[Ee]?\s*\d", raw):
+        raise ValueError(f"Ambiguous stage range: {value!r}")
+
+    normalized = re.sub(r"(?<=\d)_(?=\d)", ".", raw)
+    m = re.fullmatch(
+        r"\s*(?:(?:embryonic\s+day|day)\s*)?[Ee]?\s*(\d+(?:\.\d+)?)\s*(?:dpc|days?)?\s*",
+        normalized,
+        flags=re.IGNORECASE,
+    )
     if not m:
-        raise ValueError(f"Could not parse embryonic day from {value!r}")
+        raise ValueError(f"Expected one embryonic-day label, got {value!r}")
     return float(m.group(1))
 
 
 def stage_allowed(task: str, stage: float) -> bool:
+    """Apply only the challenge's mechanically specified stage windows.
+
+    Task 3 has genotype/perturbation restrictions that cannot be decided from stage
+    alone, so stage_allowed returns True there and callers must surface the explicit
+    T3_GENOTYPE_NOT_AUDITED warning.
+    """
     task = canonical_task(task)
     if task == "t3":
         return True
     return not any(w.contains(float(stage)) for w in PROTECTED_WINDOWS[task])
+
+
+def warn_if_t3_not_audited(task: str) -> None:
+    if canonical_task(task) == "t3":
+        print(f"WARNING: {T3_GENOTYPE_WARNING}", file=sys.stderr)
+
+
+def task_safety_metadata(task: str) -> dict:
+    task = canonical_task(task)
+    return {
+        "stage_filter_applied": task != "t3",
+        "t3_genotype_audit": "not_audited" if task == "t3" else "not_applicable",
+        "safety_note": T3_GENOTYPE_WARNING if task == "t3" else None,
+    }
 
 
 def find_stage_column(columns: Iterable[str], preferred: Optional[str] = None) -> str:
@@ -133,27 +180,39 @@ def normalize_total_log1p(adata, target_sum: float = 1e4):
     return adata
 
 
-def standardize_spatial_3d(adata):
+def standardize_spatial_3d(adata, *, allowed_obs_triples=None, allowed_obsm_keys=None):
+    """Copy an observed 3-D coordinate representation into obsm['spatial_3D'].
+
+    Source adapters should pass the exact keys/columns they have validated when known.
+    The generic defaults remain for explicitly generic use, but source-specific code can
+    now fail rather than guessing from unrelated coordinate-looking columns.
+    """
     if "spatial_3D" in adata.obsm:
         arr = np.asarray(adata.obsm["spatial_3D"], dtype=np.float32)
         if arr.ndim == 2 and arr.shape[1] >= 3:
             adata.obsm["spatial_3D"] = arr[:, :3]
             return "obsm:spatial_3D"
-    for key in ("spatial", "X_spatial", "spatial3d", "coords"):
+
+    obsm_keys = tuple(allowed_obsm_keys) if allowed_obsm_keys is not None else (
+        "spatial", "X_spatial", "spatial3d", "coords"
+    )
+    for key in obsm_keys:
         if key in adata.obsm:
             arr = np.asarray(adata.obsm[key], dtype=np.float32)
             if arr.ndim == 2 and arr.shape[1] >= 3:
                 adata.obsm["spatial_3D"] = arr[:, :3]
                 return f"obsm:{key}"
+
     cols = {str(c).lower(): c for c in adata.obs.columns}
-    candidates = [
+    candidates = tuple(allowed_obs_triples) if allowed_obs_triples is not None else (
         ("x", "y", "z"),
         ("x_coord", "y_coord", "z_coord"),
         ("xcoord", "ycoord", "zcoord"),
         ("center_x", "center_y", "center_z"),
         ("centroid_x", "centroid_y", "centroid_z"),
-    ]
+    )
     for trio in candidates:
+        trio = tuple(str(x).lower() for x in trio)
         if all(c in cols for c in trio):
             arr = adata.obs[[cols[c] for c in trio]].to_numpy(dtype=np.float32)
             adata.obsm["spatial_3D"] = arr
@@ -167,13 +226,13 @@ def write_provenance(path: Path, **payload):
 
 
 def infer_stage_from_name(name: str) -> float:
-    m = re.search(r"[Ee](\d+)[._](\d+)", name)
-    if m:
-        return float(f"{m.group(1)}.{m.group(2)}")
-    m = re.search(r"[Ee](\d+(?:\.\d+)?)", name)
-    if m:
-        return float(m.group(1))
-    raise ValueError(f"Could not infer stage from filename {name!r}; pass it explicitly")
+    matches = re.findall(r"[Ee](\d+(?:[._]\d+)?)", name)
+    if len(matches) != 1:
+        raise ValueError(
+            f"Expected exactly one embryonic-day token in filename {name!r}; found {matches or 'none'}. "
+            "Pass --stage explicitly when the source naming is more complicated."
+        )
+    return float(matches[0].replace("_", "."))
 
 
 def open_text_maybe_gzip(path: Path):

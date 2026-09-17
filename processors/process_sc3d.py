@@ -4,7 +4,11 @@ import argparse
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from vec_external.common import infer_stage_from_name, stage_allowed, load_gene_list, subset_genes, standardize_spatial_3d, write_provenance
+from vec_external.common import (
+    infer_stage_from_name, stage_allowed, load_gene_list, subset_genes,
+    standardize_spatial_3d, write_provenance, warn_if_t3_not_audited,
+    task_safety_metadata,
+)
 
 
 def main():
@@ -18,6 +22,8 @@ def main():
     if args.stage and len(args.stage) != len(args.inputs):
         raise ValueError("Provide one --stage per input or none")
 
+    warn_if_t3_not_audited(args.task)
+
     import anndata as ad
     genes = load_gene_list(args.gene_list)
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -27,16 +33,26 @@ def main():
             print(f"SKIP {src.name}: E{stage:g} is protected for {args.task}")
             continue
         a = ad.read_h5ad(src)
-        spatial_source = standardize_spatial_3d(a)
+        # sc3D public 3-D visualization objects already expose a 3-D embedding;
+        # keep accepted keys narrow so unrelated coordinate-looking columns are not guessed.
+        spatial_source = standardize_spatial_3d(
+            a,
+            allowed_obsm_keys=("spatial_3D", "spatial", "X_spatial", "coords"),
+            allowed_obs_triples=(),
+        )
         a, gene_report = subset_genes(a, genes)
         a.obs["vec_stage"] = float(stage)
         out = args.out_dir / (src.stem + f".{args.task}.h5ad")
         a.write_h5ad(out)
-        write_provenance(out.with_suffix(".provenance.json"), source="sc3D / GSE197353",
+        write_provenance(
+            out.with_suffix(".provenance.json"), source="sc3D / GSE197353",
             task=args.task, stage=stage, input=str(src), output=str(out), cells=int(a.n_obs),
             spatial_source=spatial_source, gene_report=gene_report,
             source_url="https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE197353",
-            rules_snapshot="2026-09-16")
+            rules_snapshot="2026-09-16", **task_safety_metadata(args.task),
+        )
         print(f"wrote {out} ({a.n_obs} cells, E{stage:g}, spatial={spatial_source})")
 
-if __name__ == "__main__": main()
+
+if __name__ == "__main__":
+    main()

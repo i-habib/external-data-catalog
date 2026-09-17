@@ -5,7 +5,11 @@ import re
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from vec_external.common import infer_stage_from_name, stage_allowed, load_gene_list, subset_genes, standardize_spatial_3d, write_provenance
+from vec_external.common import (
+    infer_stage_from_name, stage_allowed, load_gene_list, subset_genes,
+    standardize_spatial_3d, write_provenance, warn_if_t3_not_audited,
+    task_safety_metadata,
+)
 
 
 def _sample_key(path: Path):
@@ -47,6 +51,8 @@ def main():
     p.add_argument("--gene-list", type=Path)
     args = p.parse_args()
 
+    warn_if_t3_not_audited(args.task)
+
     matrices = {_sample_key(p): p for p in args.raw_dir.glob("*cell_by_gene.csv*")}
     metas = {_sample_key(p): p for p in args.raw_dir.glob("*cell_metadata.csv*")}
     keys = sorted(set(matrices) & set(metas))
@@ -60,16 +66,27 @@ def main():
             print(f"SKIP {key}: E{stage:g} is protected for {args.task}")
             continue
         a = _read_pair(matrices[key], metas[key])
-        spatial_source = standardize_spatial_3d(a)
+
+        # This release is a sagittal-section MERFISH resource. Until a particular
+        # release is validated with a genuine 3-D coordinate field, do not turn
+        # generic coordinate columns into challenge-style 3-D geometry.
+        spatial_source = standardize_spatial_3d(a, allowed_obsm_keys=(), allowed_obs_triples=())
+        observed_metadata_columns = [str(c) for c in a.obs.columns]
+
         a, gene_report = subset_genes(a, genes)
         a.obs["vec_stage"] = float(stage)
         out = args.out_dir / f"{key}.{args.task}.h5ad"
         a.write_h5ad(out)
-        write_provenance(out.with_suffix(".provenance.json"), source="GSE247450 MERFISH endothelial atlas",
+        write_provenance(
+            out.with_suffix(".provenance.json"), source="GSE247450 MERFISH endothelial atlas",
             task=args.task, stage=stage, matrix=str(matrices[key]), metadata=str(metas[key]),
-            output=str(out), cells=int(a.n_obs), spatial_source=spatial_source, gene_report=gene_report,
+            output=str(out), cells=int(a.n_obs), spatial_source=spatial_source,
+            observed_metadata_columns=observed_metadata_columns, gene_report=gene_report,
             source_url="https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE247450",
-            rules_snapshot="2026-09-16")
-        print(f"wrote {out} ({a.n_obs} cells, {a.n_vars} genes)")
+            rules_snapshot="2026-09-16", **task_safety_metadata(args.task),
+        )
+        print(f"wrote {out} ({a.n_obs} cells, {a.n_vars} genes, spatial_3D={spatial_source})")
 
-if __name__ == "__main__": main()
+
+if __name__ == "__main__":
+    main()
