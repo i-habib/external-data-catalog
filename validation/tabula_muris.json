@@ -1,0 +1,6 @@
+{
+  "error": "RuntimeError('unsigned S3 download failed for s3://czb-tabula-muris/TM_droplet_mat.h5ad (exit 1): fatal error: An error occurred (403) when calling the HeadObject operation: Forbidden')",
+  "source": "tabula_muris",
+  "status": "validation_error",
+  "tested_on": "2026-09-17"
+}

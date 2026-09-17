@@ -1,0 +1,101 @@
+{
+  "command": "python processors/process_gse247450.py <raw_dir> --task t2-heart --out-dir <out_dir>",
+  "observed_metadata_columns": [
+    "fov",
+    "volume",
+    "center_x",
+    "center_y",
+    "min_x",
+    "min_y",
+    "max_x",
+    "max_y",
+    "anisotropy",
+    "transcript_count",
+    "perimeter_area_ratio",
+    "solidity",
+    "Cellbound3_raw",
+    "Cellbound3_high_pass",
+    "Cellbound2_raw",
+    "Cellbound2_high_pass",
+    "Cellbound1_raw",
+    "Cellbound1_high_pass",
+    "DAPI_raw",
+    "DAPI_high_pass",
+    "PolyT_raw",
+    "PolyT_high_pass"
+  ],
+  "output_cells": 1077,
+  "output_genes": 315,
+  "processor_exit": 0,
+  "processor_stdout": "wrote /tmp/vec-external-real-ovvumrpx/gse247450_out/GSM7890128_E9.5_region_0.t2-heart.h5ad (1077 cells, 315 genes, spatial_3D=None)",
+  "provenance": {
+    "cells": 1077,
+    "gene_report": {
+      "kept": 315,
+      "missing": [],
+      "requested": null
+    },
+    "matrix": "/tmp/vec-external-real-ovvumrpx/gse247450/GSM7890128_E9.5_region_0_cell_by_gene.csv.gz",
+    "metadata": "/tmp/vec-external-real-ovvumrpx/gse247450/GSM7890128_E9.5_region_0_cell_metadata.csv.gz",
+    "observed_metadata_columns": [
+      "fov",
+      "volume",
+      "center_x",
+      "center_y",
+      "min_x",
+      "min_y",
+      "max_x",
+      "max_y",
+      "anisotropy",
+      "transcript_count",
+      "perimeter_area_ratio",
+      "solidity",
+      "Cellbound3_raw",
+      "Cellbound3_high_pass",
+      "Cellbound2_raw",
+      "Cellbound2_high_pass",
+      "Cellbound1_raw",
+      "Cellbound1_high_pass",
+      "DAPI_raw",
+      "DAPI_high_pass",
+      "PolyT_raw",
+      "PolyT_high_pass"
+    ],
+    "output": "/tmp/vec-external-real-ovvumrpx/gse247450_out/GSM7890128_E9.5_region_0.t2-heart.h5ad",
+    "rules_snapshot": "2026-09-16",
+    "safety_note": null,
+    "source": "GSE247450 MERFISH endothelial atlas",
+    "source_url": "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE247450",
+    "spatial_source": null,
+    "stage": 9.5,
+    "stage_filter_applied": true,
+    "t3_genotype_audit": "not_applicable",
+    "task": "t2-heart"
+  },
+  "raw_matrix_shape_as_stored": [
+    1077,
+    315
+  ],
+  "raw_metadata_shape": [
+    1077,
+    22
+  ],
+  "source": "GSE247450 / GSM7890128",
+  "source_files": [
+    {
+      "bytes": 50631,
+      "filename": "GSM7890128_E9.5_region_0_cell_by_gene.csv.gz",
+      "sha256": "4f808e0a6424fba01884cfca5aa9f7d8e66fb0ec6dd720c8836c096f62e18f06",
+      "url": "https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7890nnn/GSM7890128/suppl/GSM7890128_E9.5_region_0_cell_by_gene.csv.gz"
+    },
+    {
+      "bytes": 183153,
+      "filename": "GSM7890128_E9.5_region_0_cell_metadata.csv.gz",
+      "sha256": "a028a4f5e004209c2e3825c6a269397a3807e6614039ca8c498568ed9a05cbcc",
+      "url": "https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM7890nnn/GSM7890128/suppl/GSM7890128_E9.5_region_0_cell_metadata.csv.gz"
+    }
+  ],
+  "spatial_3d_present": false,
+  "status": "real_release_processor_passed",
+  "tested_on": "2026-09-17"
+}
