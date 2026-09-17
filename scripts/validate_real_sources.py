@@ -51,31 +51,43 @@ def fetch(url: str, dest: Path) -> dict:
 
 
 def fetch_public_s3(s3_uri: str, dest: Path) -> dict:
-    """Use the source project's documented unsigned S3 access path.
-
-    The legacy Tabula Muris bucket returns HTTP 403 through the convenient s3.amazonaws.com
-    URL from hosted runners, while `aws s3 ... --no-sign-request` is the documented public
-    access mechanism and succeeds without credentials.
-    """
+    """Download a public S3 object using unsigned access and keep the exact failure text."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     proc = subprocess.run(
         ["aws", "s3", "cp", "--no-sign-request", s3_uri, str(dest)],
         cwd=ROOT,
-        check=True,
         text=True,
         capture_output=True,
     )
-    return {"s3_uri": s3_uri, "access_method": "aws s3 cp --no-sign-request", "aws_stdout": proc.stdout.strip(), **hash_file(dest)}
+    if proc.returncode:
+        raise RuntimeError(
+            f"unsigned S3 download failed for {s3_uri} (exit {proc.returncode}): "
+            f"{proc.stderr.strip() or proc.stdout.strip()}"
+        )
+    return {
+        "s3_uri": s3_uri,
+        "access_method": "aws s3 cp --no-sign-request",
+        "aws_stdout": proc.stdout.strip(),
+        **hash_file(dest),
+    }
 
 
 def run(*args: object) -> subprocess.CompletedProcess:
     cmd = [sys.executable, *map(str, args)]
-    return subprocess.run(cmd, cwd=ROOT, check=True, text=True, capture_output=True)
+    proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
+    if proc.returncode:
+        raise RuntimeError(
+            f"processor failed ({proc.returncode}): {' '.join(map(str, args))}\n"
+            f"stdout: {proc.stdout.strip()}\nstderr: {proc.stderr.strip()}"
+        )
+    return proc
 
 
 def write_manifest(name: str, payload: dict) -> None:
     payload = {"tested_on": TESTED_ON, **payload}
-    (VALIDATION / f"{name}.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (VALIDATION / f"{name}.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def validate_gse247450() -> None:
@@ -137,16 +149,17 @@ def validate_mouse_go() -> None:
 
 
 def validate_tabula_muris() -> None:
-    matrix_uri = "s3://czbiohub-tabula-muris/TM_droplet_mat.h5ad"
-    meta_uri = "s3://czbiohub-tabula-muris/TM_droplet_metadata.csv"
+    # Current AWS Open Data Registry bucket. Older project docs use the retired
+    # `czbiohub-tabula-muris` name, which now fails from hosted runners.
+    matrix_uri = "s3://czb-tabula-muris/TM_droplet_mat.h5ad"
+    meta_uri = "s3://czb-tabula-muris/TM_droplet_metadata.csv"
     matrix = WORK / "TM_droplet_mat.h5ad"
     metadata = WORK / "TM_droplet_metadata.csv"
     sources = [fetch_public_s3(matrix_uri, matrix), fetch_public_s3(meta_uri, metadata)]
     meta = pd.read_csv(metadata, index_col=0)
-    tissue_col = "tissue" if "tissue" in meta.columns else None
-    if tissue_col is None:
+    if "tissue" not in meta.columns:
         raise RuntimeError(f"Expected tissue column in Tabula Muris metadata; saw {list(meta.columns)}")
-    tissue_values = sorted({str(x) for x in meta[tissue_col].dropna().unique()})
+    tissue_values = sorted({str(x) for x in meta["tissue"].dropna().unique()})
     heart_values = [x for x in tissue_values if "heart" in x.lower()]
     if not heart_values:
         raise RuntimeError(f"No heart-like tissue label in real metadata: {tissue_values}")
@@ -175,7 +188,7 @@ def validate_tabula_muris() -> None:
         "output_cells": int(result.n_obs),
         "output_genes": int(result.n_vars),
         "provenance": provenance,
-        "access_quirk": "plain s3.amazonaws.com download returned HTTP 403 on GitHub Actions; unsigned S3 API access works and is the source project's documented method",
+        "access_quirk": "legacy bucket name / plain HTTPS failed during validation; current Open Data Registry bucket `czb-tabula-muris` with unsigned S3 access is the working route",
     })
 
 
@@ -186,7 +199,10 @@ def probe_sc3d_release() -> None:
         files = json.load(r)
     h5ads = [f for f in files if str(f.get("name", "")).lower().endswith(".h5ad")]
     if not h5ads:
-        write_manifest("sc3d_e9_0", {"source": "sc3D E9.0 Figshare", "status": "no_h5ad_found_via_figshare_api", "api": api, "files": files})
+        write_manifest("sc3d_e9_0", {
+            "source": "sc3D E9.0 Figshare", "status": "no_h5ad_found_via_figshare_api",
+            "api": api, "files": files,
+        })
         return
     item = h5ads[0]
     size = int(item.get("size") or 0)
@@ -234,14 +250,36 @@ def record_extended_mouse_atlas_constraint() -> None:
 
 def main() -> None:
     print("workdir", WORK)
-    validate_gse247450()
-    validate_mouse_go()
-    validate_tabula_muris()
-    probe_sc3d_release()
+    checks = [
+        ("gse247450_e9_5_region0", validate_gse247450),
+        ("mouse_go", validate_mouse_go),
+        ("tabula_muris", validate_tabula_muris),
+        ("sc3d_e9_0", probe_sc3d_release),
+    ]
+    failures = []
+    for name, fn in checks:
+        print(f"\n--- validating {name} ---")
+        try:
+            fn()
+        except Exception as exc:
+            failures.append((name, repr(exc)))
+            write_manifest(name, {
+                "status": "validation_error",
+                "source": name,
+                "error": repr(exc),
+            })
+            print(f"FAILED {name}: {exc}", file=sys.stderr)
+
     record_extended_mouse_atlas_constraint()
-    print("wrote manifests:")
+    print("\nwrote manifests:")
     for p in sorted(VALIDATION.glob("*.json")):
         print(" -", p.relative_to(ROOT))
+
+    if failures:
+        print("\nvalidation failures:", file=sys.stderr)
+        for name, err in failures:
+            print(f" - {name}: {err}", file=sys.stderr)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
