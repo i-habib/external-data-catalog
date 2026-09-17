@@ -123,7 +123,7 @@ def _parse_geo_family_soft(path: Path) -> dict[str, dict]:
                 samples[current]["source_name"] = line.split("=", 1)[1].strip()
             elif line.startswith("!Sample_characteristics_ch1 = "):
                 samples[current]["characteristics"].append(line.split("=", 1)[1].strip())
-            elif line.startswith("!Sample_supplementary_file = "):
+            elif line.startswith("!Sample_supplementary_file"):
                 samples[current]["supplementary_files"].append(line.split("=", 1)[1].strip())
     return samples
 
@@ -272,9 +272,6 @@ def record_extended_mouse_atlas_constraint() -> None:
 
 
 def record_tabula_muris_demotion() -> None:
-    # We tried both the legacy project bucket and the current Open Data Registry bucket.
-    # The latter returned 403 HeadObject from GitHub Actions on 2026-09-17. Keep the failure
-    # visible, but do not repeatedly fail the catalog validator for a demoted optional source.
     write_manifest("tabula_muris", {
         "source": "Tabula Muris",
         "status": "demoted_after_access_failure",
