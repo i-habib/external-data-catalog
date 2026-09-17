@@ -21,6 +21,19 @@ WORK = Path(tempfile.mkdtemp(prefix="vec-external-real-"))
 TESTED_ON = datetime.now(timezone.utc).date().isoformat()
 
 
+def hash_file(path: Path) -> dict:
+    h = hashlib.sha256()
+    total = 0
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(8 * 1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+            total += len(chunk)
+    return {"sha256": h.hexdigest(), "bytes": total, "filename": path.name}
+
+
 def fetch(url: str, dest: Path) -> dict:
     dest.parent.mkdir(parents=True, exist_ok=True)
     h = hashlib.sha256()
@@ -37,14 +50,22 @@ def fetch(url: str, dest: Path) -> dict:
     return {"url": url, "sha256": h.hexdigest(), "bytes": total, "filename": dest.name}
 
 
-def head_size(url: str) -> int | None:
-    try:
-        req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "vec-external-catalog-validation/1.0"})
-        with urllib.request.urlopen(req, timeout=60) as r:
-            value = r.headers.get("Content-Length")
-            return int(value) if value else None
-    except Exception:
-        return None
+def fetch_public_s3(s3_uri: str, dest: Path) -> dict:
+    """Use the source project's documented unsigned S3 access path.
+
+    The legacy Tabula Muris bucket returns HTTP 403 through the convenient s3.amazonaws.com
+    URL from hosted runners, while `aws s3 ... --no-sign-request` is the documented public
+    access mechanism and succeeds without credentials.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(
+        ["aws", "s3", "cp", "--no-sign-request", s3_uri, str(dest)],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return {"s3_uri": s3_uri, "access_method": "aws s3 cp --no-sign-request", "aws_stdout": proc.stdout.strip(), **hash_file(dest)}
 
 
 def run(*args: object) -> subprocess.CompletedProcess:
@@ -76,6 +97,7 @@ def validate_gse247450() -> None:
     provenance = json.loads(out.with_suffix(".provenance.json").read_text())
 
     write_manifest("gse247450_e9_5_region0", {
+        "status": "real_release_processor_passed",
         "source": "GSE247450 / GSM7890128",
         "source_files": files,
         "command": "python processors/process_gse247450.py <raw_dir> --task t2-heart --out-dir <out_dir>",
@@ -101,6 +123,7 @@ def validate_mouse_go() -> None:
     proc = run(ROOT / "processors/prepare_mouse_go.py", src, "--gene-list", genes, "--out", out)
     table = pd.read_csv(out)
     write_manifest("mouse_go", {
+        "status": "real_release_processor_passed",
         "source": "Mouse Gene Ontology GAF",
         "source_files": [source],
         "command": "python processors/prepare_mouse_go.py MOUSE-mod.gaf.gz --gene-list <3-gene probe> --out <csv>",
@@ -114,23 +137,11 @@ def validate_mouse_go() -> None:
 
 
 def validate_tabula_muris() -> None:
-    matrix_url = "https://s3.amazonaws.com/czbiohub-tabula-muris/TM_droplet_mat.h5ad"
-    meta_url = "https://s3.amazonaws.com/czbiohub-tabula-muris/TM_droplet_metadata.csv"
-    advertised_size = head_size(matrix_url)
-    # This is deliberately a real-run gate, not a fake success. If the release becomes too
-    # large for the hosted validation runner, record that fact and stop advertising it as validated.
-    if advertised_size is not None and advertised_size > 2_500_000_000:
-        write_manifest("tabula_muris", {
-            "source": "Tabula Muris droplet release",
-            "status": "not_run_release_too_large_for_hosted_validator",
-            "matrix_url": matrix_url,
-            "content_length": advertised_size,
-        })
-        return
-
+    matrix_uri = "s3://czbiohub-tabula-muris/TM_droplet_mat.h5ad"
+    meta_uri = "s3://czbiohub-tabula-muris/TM_droplet_metadata.csv"
     matrix = WORK / "TM_droplet_mat.h5ad"
     metadata = WORK / "TM_droplet_metadata.csv"
-    sources = [fetch(matrix_url, matrix), fetch(meta_url, metadata)]
+    sources = [fetch_public_s3(matrix_uri, matrix), fetch_public_s3(meta_uri, metadata)]
     meta = pd.read_csv(metadata, index_col=0)
     tissue_col = "tissue" if "tissue" in meta.columns else None
     if tissue_col is None:
@@ -150,6 +161,7 @@ def validate_tabula_muris() -> None:
     result = ad.read_h5ad(out)
     provenance = json.loads(out.with_suffix(".provenance.json").read_text())
     write_manifest("tabula_muris", {
+        "status": "real_release_processor_passed",
         "source": "Tabula Muris droplet release",
         "source_files": sources,
         "command": "python processors/process_tabula_muris.py TM_droplet_mat.h5ad --metadata TM_droplet_metadata.csv --tissue <observed heart label(s)> --out <h5ad>",
@@ -163,6 +175,7 @@ def validate_tabula_muris() -> None:
         "output_cells": int(result.n_obs),
         "output_genes": int(result.n_vars),
         "provenance": provenance,
+        "access_quirk": "plain s3.amazonaws.com download returned HTTP 403 on GitHub Actions; unsigned S3 API access works and is the source project's documented method",
     })
 
 
@@ -177,8 +190,6 @@ def probe_sc3d_release() -> None:
         return
     item = h5ads[0]
     size = int(item.get("size") or 0)
-    # Try the real release when it is reasonable for the hosted runner. Otherwise commit a
-    # truthful size/status manifest rather than implying that the adapter was exercised.
     if size > 2_500_000_000:
         write_manifest("sc3d_e9_0", {
             "source": "sc3D E9.0 Figshare",
@@ -196,6 +207,7 @@ def probe_sc3d_release() -> None:
     result = ad.read_h5ad(outputs[0])
     provenance = json.loads(outputs[0].with_suffix(".provenance.json").read_text())
     write_manifest("sc3d_e9_0", {
+        "status": "real_release_processor_passed",
         "source": "sc3D E9.0 Figshare",
         "figshare_file": item,
         "source_files": [source],
@@ -210,8 +222,6 @@ def probe_sc3d_release() -> None:
 
 
 def record_extended_mouse_atlas_constraint() -> None:
-    # The official release page distributes the package as a 25 GB tarball. Do not call the
-    # adapter "real-run validated" until we have actually processed that release elsewhere.
     write_manifest("extended_mouse_atlas", {
         "source": "Extended Mouse Atlas",
         "status": "not_real_run_validated",
