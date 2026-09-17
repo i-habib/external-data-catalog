@@ -34,23 +34,36 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
       - name: Run processors on public releases
+        id: real_validation
+        continue-on-error: true
         run: python scripts/validate_real_sources.py
       - name: Show validation manifests
+        if: always()
         run: |
-          for f in validation/*.json; do
+          shopt -s nullglob
+          files=(validation/*.json)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No manifests were produced"
+            exit 1
+          fi
+          for f in "${files[@]}"; do
             echo "===== $f ====="
             cat "$f"
           done
       - name: Commit observed release evidence
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add validation
           if git diff --cached --quiet; then
             echo "No validation changes"
-            exit 0
+          else
+            git commit -m "Record real source validation [real-source-validation] [skip ci]"
+            git fetch origin main
+            git rebase origin/main
+            git push origin HEAD:main
           fi
-          git commit -m "Record real source validation [real-source-validation] [skip ci]"
-          git fetch origin main
-          git rebase origin/main
-          git push origin HEAD:main
+      - name: Fail if any real-source validation failed
+        if: steps.real_validation.outcome != 'success'
+        run: exit 1
